@@ -93,6 +93,37 @@ class TestDispatcherPath:
         assert result.model == "smart"
         assert stub.call_count == 1
 
+    @pytest.mark.asyncio
+    async def test_dispatcher_returns_non_candidate_falls_back(self):
+        stub = StubDispatcher(response='{"model": "unknown-model", "reasoning": "x"}')
+        router = _make_router(dispatcher=stub)
+        result = await router.async_pre_routing_hook(
+            model="smart-router", request_kwargs={}, messages=[{"role": "user", "content": "hi"}]
+        )
+        assert result is not None
+        assert result.model in {"fast", "smart"}
+        assert result.model != "unknown-model"
+
+    @pytest.mark.asyncio
+    async def test_dispatcher_raises_falls_back(self):
+        stub = StubDispatcher(raises=RuntimeError("dispatcher down"))
+        router = _make_router(dispatcher=stub)
+        result = await router.async_pre_routing_hook(
+            model="smart-router", request_kwargs={}, messages=[{"role": "user", "content": "hi"}]
+        )
+        assert result is not None
+        assert result.model in {"fast", "smart"}
+
+    @pytest.mark.asyncio
+    async def test_dispatcher_unparseable_response_falls_back(self):
+        stub = StubDispatcher(response="the best model is smart obviously")
+        router = _make_router(dispatcher=stub)
+        result = await router.async_pre_routing_hook(
+            model="smart-router", request_kwargs={}, messages=[{"role": "user", "content": "hi"}]
+        )
+        assert result is not None
+        assert result.model in {"fast", "smart"}
+
 
 class TestDispatcherPrompt:
     @pytest.mark.asyncio
@@ -148,39 +179,6 @@ class TestConfigValidation:
 
         with pytest.raises(ValidationError):
             LLMRouterConfig(available_models=[])
-
-
-class TestDispatcherPath:
-    @pytest.mark.asyncio
-    async def test_dispatcher_returns_non_candidate_falls_back(self):
-        stub = StubDispatcher(response='{"model": "unknown-model", "reasoning": "x"}')
-        router = _make_router(dispatcher=stub)
-        result = await router.async_pre_routing_hook(
-            model="smart-router", request_kwargs={}, messages=[{"role": "user", "content": "hi"}]
-        )
-        assert result is not None
-        assert result.model in {"fast", "smart"}
-        assert result.model != "unknown-model"
-
-    @pytest.mark.asyncio
-    async def test_dispatcher_raises_falls_back(self):
-        stub = StubDispatcher(raises=RuntimeError("dispatcher down"))
-        router = _make_router(dispatcher=stub)
-        result = await router.async_pre_routing_hook(
-            model="smart-router", request_kwargs={}, messages=[{"role": "user", "content": "hi"}]
-        )
-        assert result is not None
-        assert result.model in {"fast", "smart"}
-
-    @pytest.mark.asyncio
-    async def test_dispatcher_unparseable_response_falls_back(self):
-        stub = StubDispatcher(response="the best model is smart obviously")
-        router = _make_router(dispatcher=stub)
-        result = await router.async_pre_routing_hook(
-            model="smart-router", request_kwargs={}, messages=[{"role": "user", "content": "hi"}]
-        )
-        assert result is not None
-        assert result.model in {"fast", "smart"}
 
 
 class TestHeuristicFallback:
