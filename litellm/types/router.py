@@ -270,6 +270,10 @@ class GenericLiteLLMParams(CredentialLiteLLMParams, CustomPricingLiteLLMParams):
     quality_router_config: Optional[Dict] = None
     quality_router_default_model: Optional[str] = None
 
+    # llm-router params
+    llm_router_config: Optional[Dict] = None
+    llm_router_default_model: Optional[str] = None
+
     # Batch/File API Params
     s3_bucket_name: Optional[str] = None
     s3_encryption_key_id: Optional[str] = None
@@ -858,3 +862,26 @@ class AdaptiveRouterPreferences(BaseModel):
 
     quality_tier: int = Field(ge=1, le=3)
     strengths: List[RequestType] = Field(default_factory=list)
+
+
+class LLMRouterCapabilities(BaseModel):
+    """Per-model capability/benchmark metadata declared in ``model_info`` under
+    ``llm_router_capabilities``. All fields optional; the LLM dispatcher and the
+    heuristic fallback only use whichever fields a model declares."""
+
+    quality_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    speed_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    context_window: Optional[int] = Field(default=None, gt=0)
+    strengths: List[str] = Field(default_factory=list)
+
+
+class LLMRouterConfig(BaseModel):
+    """Configuration for the LLMRouter strategy (``auto_router/llm_router``)."""
+
+    available_models: List[str]
+    dispatcher_model: Optional[str] = None
+    quality_preference: float = Field(default=0.5, ge=0.0, le=1.0)
+    default_model: Optional[str] = None
+    cache_ttl_seconds: int = Field(default=300, gt=0)
+    dispatcher_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    dispatcher_max_tokens: int = Field(default=200, gt=0)
