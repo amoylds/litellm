@@ -878,7 +878,7 @@ class LLMRouterCapabilities(BaseModel):
 class LLMRouterConfig(BaseModel):
     """Configuration for the LLMRouter strategy (``auto_router/llm_router``)."""
 
-    available_models: List[str]
+    available_models: List[str] = Field(..., min_length=1)
     dispatcher_model: Optional[str] = None
     quality_preference: float = Field(default=0.5, ge=0.0, le=1.0)
     default_model: Optional[str] = None

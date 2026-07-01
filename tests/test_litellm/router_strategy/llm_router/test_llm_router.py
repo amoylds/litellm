@@ -54,10 +54,12 @@ class StubDispatcher:
         self._raises = raises
         self.call_count = 0
         self.prompts: list[str] = []
+        self.contexts: list[str] = []
 
     async def choose_model(self, context: str, prompt: str) -> str:
         self.call_count += 1
         self.prompts.append(prompt)
+        self.contexts.append(context)
         if self._raises is not None:
             raise self._raises
         return self._response
@@ -91,6 +93,64 @@ class TestDispatcherPath:
         assert result.model == "smart"
         assert stub.call_count == 1
 
+
+class TestDispatcherPrompt:
+    @pytest.mark.asyncio
+    async def test_context_has_no_literal_prompt_placeholder(self):
+        # Regression: the dispatcher system message must not contain the literal
+        # "{prompt}" placeholder. The user text arrives in the user-role message.
+        stub = StubDispatcher(response='{"model": "smart"}')
+        router = _make_router(dispatcher=stub)
+        await router.async_pre_routing_hook(
+            model="smart-router", request_kwargs={}, messages=[{"role": "user", "content": "hello"}]
+        )
+        context = stub.contexts[0]
+        assert "{prompt}" not in context
+        assert "Candidates:" in context
+        assert "fast" in context and "smart" in context
+
+    @pytest.mark.asyncio
+    async def test_context_is_precomputed_once(self):
+        # Regression: the candidate context is fixed at construction and should be
+        # reused across dispatch calls rather than rebuilt each time.
+        stub = StubDispatcher(response='{"model": "smart"}')
+        router = _make_router(dispatcher=stub)
+        await router.async_pre_routing_hook(
+            model="smart-router", request_kwargs={}, messages=[{"role": "user", "content": "first"}]
+        )
+        await router.async_pre_routing_hook(
+            model="smart-router", request_kwargs={}, messages=[{"role": "user", "content": "second"}]
+        )
+        assert stub.contexts[0] == stub.contexts[1]
+
+
+class TestFenceStripping:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ('{"model": "smart"}', "smart"),
+            ('```json\n{"model": "smart"}```', "smart"),
+            ('```\n{"model": "smart"}\n```', "smart"),
+            # Regression: a model name containing a backtick must survive fence
+            # stripping (strip("`") would corrupt the JSON content).
+            ('{"model": "fast`tick"}', "fast`tick"),
+        ],
+    )
+    def test_parse_dispatch_response_handles_fences(self, raw: str, expected: str):
+        from litellm.router_strategy.llm_router.llm_router import _parse_dispatch_response
+
+        assert _parse_dispatch_response(raw) == expected
+
+
+class TestConfigValidation:
+    def test_available_models_rejects_empty_list(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            LLMRouterConfig(available_models=[])
+
+
+class TestDispatcherPath:
     @pytest.mark.asyncio
     async def test_dispatcher_returns_non_candidate_falls_back(self):
         stub = StubDispatcher(response='{"model": "unknown-model", "reasoning": "x"}')

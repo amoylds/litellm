@@ -65,12 +65,18 @@ class _DispatchResult(BaseModel):
 
 def _strip_json_fence(text: str) -> str:
     trimmed = text.strip()
-    if trimmed.startswith("```"):
-        trimmed = trimmed.strip("`")
-        if trimmed.lower().startswith("json"):
-            trimmed = trimmed[4:]
-        return trimmed.strip()
-    return trimmed
+    if not trimmed.startswith("```"):
+        return trimmed
+    end = 3
+    while end < len(trimmed) and trimmed[end] == "`":
+        end += 1
+    trimmed = trimmed[end:]
+    if trimmed[:4].lower() == "json":
+        trimmed = trimmed[4:]
+    rstripped = trimmed.rstrip()
+    if rstripped.endswith("```"):
+        trimmed = rstripped[: rstripped.rfind("```")]
+    return trimmed.strip()
 
 
 def _parse_dispatch_response(raw: str) -> str | None:
@@ -97,7 +103,6 @@ def _build_candidate_context(
     return DISPATCHER_PROMPT_TEMPLATE.format(
         quality_preference=quality_preference,
         candidates="\n".join(lines),
-        prompt="{prompt}",
     )
 
 
@@ -123,6 +128,9 @@ class LLMRouter(CustomLogger):
         self._candidates: Mapping[str, LLMRouterCapabilities] = dict(model_to_capabilities)
         self._cost_map: Mapping[str, float] = dict(model_to_cost)
         self._cache: OrderedDict[str, tuple[float, str]] = OrderedDict()
+        self._context_template: str = _build_candidate_context(
+            self._candidates, self._cost_map, config.quality_preference
+        )
         self._dispatcher: DispatcherClient | None = dispatcher
         if self._dispatcher is None and config.dispatcher_model is not None:
             self._dispatcher = LiteLLMDispatcher(
@@ -169,8 +177,7 @@ class LLMRouter(CustomLogger):
         if self._dispatcher is None:
             return None, "heuristic"
         try:
-            context = _build_candidate_context(self._candidates, self._cost_map, self.config.quality_preference)
-            raw = await self._dispatcher.choose_model(context, user_text)
+            raw = await self._dispatcher.choose_model(self._context_template, user_text)
         except Exception as e:  # noqa: BLE001  # dispatcher is best-effort: any failure must fall back to the heuristic
             verbose_router_logger.warning("LLMRouter dispatcher call failed: %s", e)
             return None, "heuristic"
