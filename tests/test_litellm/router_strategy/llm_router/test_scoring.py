@@ -94,9 +94,7 @@ class TestPromptAwareSelection:
             "alpha": _caps(quality_score=0.5, speed_score=0.5, strengths=["general_knowledge"]),
         }
         analysis = analyze_prompt("what is the capital of france")
-        cheaper_alpha = pick_model_prompt_aware(
-            candidates, {"zeta": 0.001, "alpha": 0.0001}, 0.5, analysis
-        )
+        cheaper_alpha = pick_model_prompt_aware(candidates, {"zeta": 0.001, "alpha": 0.0001}, 0.5, analysis)
         assert cheaper_alpha == "alpha"
         equal_cost = pick_model_prompt_aware(candidates, {"zeta": 0.0, "alpha": 0.0}, 0.5, analysis)
         assert equal_cost == "alpha"

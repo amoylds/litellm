@@ -466,7 +466,7 @@ class Router:
         self.complexity_routers: Dict[str, "ComplexityRouter"] = {}
         self.adaptive_routers: Dict[str, "AdaptiveRouter"] = {}
         self.quality_routers: Dict[str, "QualityRouter"] = {}
-        self.llm_routers: Dict[str, "LLMRouter"] = {}
+        self.llm_routers: dict[str, LLMRouter] = {}
 
         # Initialize model_group_alias early since it's used in set_model_list
         self.model_group_alias: Dict[str, Union[str, RouterModelGroupAliasItem]] = (
@@ -7715,27 +7715,27 @@ class Router:
             raise ValueError("llm_router_config is required for llm-router deployments.")
 
         default_model: Optional[str] = deployment.litellm_params.llm_router_default_model
-        config = LLMRouterConfig(**raw_config)
+        config = LLMRouterConfig.model_validate(raw_config)
         if default_model is not None and config.default_model is None:
             config = config.model_copy(update={"default_model": default_model})
 
-        model_to_capabilities: Dict[str, LLMRouterCapabilities] = {}
-        model_to_cost: Dict[str, float] = {}
+        model_to_capabilities: dict[str, LLMRouterCapabilities] = {}
+        model_to_cost: dict[str, float] = {}
         for name in config.available_models:
             indices = self.model_name_to_deployment_indices.get(name, [])
             if not indices:
                 continue
             d = (self.model_list or [])[indices[0]]
             mi = d.get("model_info") if isinstance(d, dict) else d.model_info
-            mi_dict: Dict[str, Any] = mi if isinstance(mi, dict) else (mi.model_dump() if mi else {})
+            mi_dict: dict[str, Any] = mi if isinstance(mi, dict) else (mi.model_dump() if mi else {})
             caps_raw = mi_dict.get("llm_router_capabilities")
             if caps_raw is not None:
-                model_to_capabilities[name] = LLMRouterCapabilities(**caps_raw)
+                model_to_capabilities[name] = LLMRouterCapabilities.model_validate(caps_raw)
             else:
                 model_to_capabilities[name] = LLMRouterCapabilities()
 
             lp = d.get("litellm_params") if isinstance(d, dict) else d.litellm_params
-            lp_dict: Dict[str, Any] = lp if isinstance(lp, dict) else (lp.model_dump() if lp else {})
+            lp_dict: dict[str, Any] = lp if isinstance(lp, dict) else (lp.model_dump() if lp else {})
             cost = lp_dict.get("input_cost_per_token")
             if cost is not None:
                 model_to_cost[name] = float(cost)
