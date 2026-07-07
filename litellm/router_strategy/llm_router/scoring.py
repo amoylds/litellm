@@ -102,6 +102,13 @@ def _meets_requirements(analysis: PromptAnalysis, affinity: CategoryAffinity) ->
     return True
 
 
+def candidate_meets_requirements(analysis: PromptAnalysis, capabilities: LLMRouterCapabilities) -> bool:
+    """Whether ``capabilities`` satisfies the vision/tools requirements ``analysis``
+    demands. Used to reject a dispatcher pick that would violate a capability the
+    prompt needs, so the LLM path honors the same guarantees as the local scorer."""
+    return _meets_requirements(analysis, affinity_from_strengths(tuple(capabilities.strengths)))
+
+
 def pick_model_prompt_aware(
     candidates: Mapping[str, LLMRouterCapabilities],
     cost_map: Mapping[str, float],

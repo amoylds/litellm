@@ -40,7 +40,10 @@ from litellm.router_strategy.llm_router.prompt_analysis import (
     messages_have_images,
     tools_requested,
 )
-from litellm.router_strategy.llm_router.scoring import pick_model_prompt_aware
+from litellm.router_strategy.llm_router.scoring import (
+    candidate_meets_requirements,
+    pick_model_prompt_aware,
+)
 from litellm.types.llms.openai import AllMessageValues
 from litellm.types.router import LLMRouterCapabilities, LLMRouterConfig
 
@@ -191,11 +194,23 @@ class LLMRouter(CustomLogger):
             return cached, "cache"
 
         chosen, via = await self._dispatch(user_text)
+        if chosen is not None and not self._dispatch_choice_allowed(chosen, analysis):
+            verbose_router_logger.warning(
+                "LLMRouter dispatcher chose %s which fails the prompt's capability requirements; using heuristic",
+                chosen,
+            )
+            chosen = None
         if chosen is None:
             chosen = self._heuristic_model(analysis)
             via = "heuristic"
         self._cache_store(key, chosen)
         return chosen, via
+
+    def _dispatch_choice_allowed(self, chosen: str, analysis: PromptAnalysis | None) -> bool:
+        if analysis is None:
+            return True
+        caps = self._candidates.get(chosen)
+        return caps is not None and candidate_meets_requirements(analysis, caps)
 
     async def _dispatch(self, user_text: str) -> tuple[str | None, str]:
         if self._dispatcher is None:

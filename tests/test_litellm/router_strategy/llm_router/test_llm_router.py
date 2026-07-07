@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from litellm.router_strategy.llm_router.config import LLM_ROUTER_DECISION_KEY
 from litellm.router_strategy.llm_router.dispatcher import DispatcherClient
 from litellm.router_strategy.llm_router.llm_router import LLMRouter
 from litellm.types.router import LLMRouterCapabilities, LLMRouterConfig
@@ -123,6 +124,40 @@ class TestDispatcherPath:
         )
         assert result is not None
         assert result.model in {"fast", "smart"}
+
+    @pytest.mark.asyncio
+    async def test_dispatcher_choice_violating_capability_is_overridden(self):
+        # Regression: an image prompt must not be served by a text-only model even
+        # when the dispatcher picks one; the capability guarantee that the local
+        # analyzer provides has to hold on the dispatcher path too.
+        candidates = {
+            "eyes": _caps(quality_score=0.4, speed_score=0.5, strengths=["vision"]),
+            "brain": _caps(quality_score=0.95, speed_score=0.5, strengths=["reasoning"]),
+        }
+        stub = StubDispatcher(response='{"model": "brain", "reasoning": "smartest"}')
+        request_kwargs: dict = {}
+        router = _make_router(
+            dispatcher=stub,
+            config=_config(available_models=["eyes", "brain"]),
+            candidates=candidates,
+            costs={"eyes": 0.0, "brain": 0.0},
+        )
+        result = await router.async_pre_routing_hook(
+            model="smart-router",
+            request_kwargs=request_kwargs,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "what is in this picture"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,xxx"}},
+                    ],
+                }
+            ],
+        )
+        assert result is not None
+        assert result.model == "eyes"
+        assert request_kwargs["metadata"][LLM_ROUTER_DECISION_KEY]["routed_via"] == "heuristic"
 
 
 class TestDispatcherPrompt:
