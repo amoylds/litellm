@@ -23,13 +23,32 @@ For each request:
    highest quality) is included in the dispatcher prompt context so the
    decision and the bias live in one place.
 4. On any failure (no dispatcher configured, LLM call error, unparseable
-   response, chosen model not a candidate), fall back to a deterministic
-   heuristic: pick by `quality_preference`-weighted score over normalized
-   declared `quality_score` / `speed_score`, tie-break by cheapest cost then
-   name.
+   response, chosen model not a candidate), fall back to a deterministic,
+   content-aware heuristic (see below). No LLM call, no cost.
 5. Each routing decision is cached in-memory by a hash of (prompt, candidate
-   set, preference) for `cache_ttl_seconds`, so repeated identical prompts skip
-   the dispatcher call.
+   set, preference, capability requirements) for `cache_ttl_seconds`, so
+   repeated identical prompts skip the dispatcher call.
+
+## Content-aware heuristic
+
+Ported from SmarterRouter, the heuristic analyzes the prompt itself so the
+router can pick the right model with zero extra LLM calls; setting
+`dispatcher_model` to null makes this the primary, fully local and free path.
+
+Each prompt is scored across task categories (reasoning, coding, creativity,
+factual) from keyword and structure signals, plus a meta `complexity` score and
+`vision` / `tools` capability requirements read from the request envelope
+(image content parts, `tools`, and a `{"type": "json_object"}` response format).
+Each candidate's declared `strengths` are matched to those same categories, and
+the model whose strengths best fit what the prompt needs wins, blended with the
+`quality_preference`-weighted `quality_score` / `speed_score` and a
+complexity-driven nudge toward higher-quality models. When a prompt needs vision
+or tools, only candidates that declare that capability are considered (unless
+none qualify). Ties break by cheapest cost then name. So a coding prompt goes to
+the model that declares a coding strength, a factual lookup goes to the
+factual/general model, and an image prompt goes to a vision model even if a
+text-only model scores higher on quality. Set `prompt_analysis_enabled: false`
+to revert to the prompt-blind `quality_score` / `speed_score` scorer.
 
 The decision is stashed on `request_kwargs["metadata"]["llm_router_decision"]`
 as `{"router_model_name", "routed_model", "routed_via"}` where `routed_via` is
@@ -45,7 +64,11 @@ fields are optional:
 - `quality_score` (0.0-1.0)
 - `speed_score` (0.0-1.0)
 - `context_window` (tokens)
-- `strengths` (list of free-text strings, surfaced to the dispatcher)
+- `strengths` (list of free-text strings, surfaced to the dispatcher and matched
+  to prompt categories by the content-aware heuristic; keywords like `code`,
+  `reason`/`math`, `creative`/`writing`, `fact`/`qa`, `vision`/`image`, and
+  `tool`/`function`/`agent` map to the coding, reasoning, creativity, factual,
+  vision, and tools categories)
 
 Per-model cost is read from the deployment's `input_cost_per_token`.
 
@@ -86,6 +109,7 @@ model_list:
         cache_ttl_seconds: 300
         dispatcher_temperature: 0.0
         dispatcher_max_tokens: 200
+        prompt_analysis_enabled: true
 ```
 
 ## Comparison with the other routers
@@ -101,5 +125,5 @@ model_list:
 
 ## Fallback chain
 
-dispatcher LLM (primary) -> heuristic scorer -> `default_model` -> first
-candidate.
+dispatcher LLM (primary) -> content-aware heuristic scorer -> `default_model` ->
+first candidate.

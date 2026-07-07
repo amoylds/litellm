@@ -33,6 +33,14 @@ from litellm.router_strategy.llm_router.dispatcher import (
     LiteLLMDispatcher,
 )
 from litellm.router_strategy.llm_router.heuristic import pick_model_heuristic
+from litellm.router_strategy.llm_router.prompt_analysis import (
+    PromptAnalysis,
+    analyze_prompt,
+    is_json_object_response_format,
+    messages_have_images,
+    tools_requested,
+)
+from litellm.router_strategy.llm_router.scoring import pick_model_prompt_aware
 from litellm.types.llms.openai import AllMessageValues
 from litellm.types.router import LLMRouterCapabilities, LLMRouterConfig
 
@@ -154,21 +162,37 @@ class LLMRouter(CustomLogger):
 
         user_text = get_last_user_message(cast(list[AllMessageValues], messages)) or ""
         if not user_text:
-            return self._respond(self._fallback_model(), messages, request_kwargs, "no_user_message")
+            return self._respond(self._heuristic_model(None), messages, request_kwargs, "no_user_message")
 
-        chosen, via = await self._route(user_text)
+        analysis = self._analyze(user_text, messages, request_kwargs)
+        chosen, via = await self._route(user_text, analysis)
         self._stash_decision(request_kwargs, chosen, via)
         return PreRoutingHookResponse(model=chosen, messages=messages)
 
-    async def _route(self, user_text: str) -> tuple[str, str]:
-        key = self._cache_key(user_text)
+    def _analyze(
+        self,
+        user_text: str,
+        messages: object,
+        request_kwargs: Mapping[str, object],
+    ) -> PromptAnalysis | None:
+        if not self.config.prompt_analysis_enabled:
+            return None
+        return analyze_prompt(
+            user_text,
+            has_images=messages_have_images(messages),
+            has_tools=tools_requested(request_kwargs.get("tools")),
+            has_json_mode=is_json_object_response_format(request_kwargs.get("response_format")),
+        )
+
+    async def _route(self, user_text: str, analysis: PromptAnalysis | None) -> tuple[str, str]:
+        key = self._cache_key(user_text, analysis)
         cached = self._cache_lookup(key)
         if cached is not None:
             return cached, "cache"
 
         chosen, via = await self._dispatch(user_text)
         if chosen is None:
-            chosen = self._fallback_model()
+            chosen = self._heuristic_model(analysis)
             via = "heuristic"
         self._cache_store(key, chosen)
         return chosen, via
@@ -188,16 +212,17 @@ class LLMRouter(CustomLogger):
             return None, "heuristic"
         return chosen, "dispatcher"
 
-    def _fallback_model(self) -> str:
-        try:
+    def _heuristic_model(self, analysis: PromptAnalysis | None) -> str:
+        if self._candidates:
+            if analysis is not None:
+                return pick_model_prompt_aware(
+                    self._candidates, self._cost_map, self.config.quality_preference, analysis
+                )
             return pick_model_heuristic(self._candidates, self._cost_map, self.config.quality_preference)
-        except ValueError:
-            default = self.config.default_model
-            if default is not None:
-                return default
-            if self._candidates:
-                return next(iter(self._candidates))
-            raise ValueError(f"LLMRouter[{self.model_name}] has no candidates and no default_model")
+        default = self.config.default_model
+        if default is not None:
+            return default
+        raise ValueError(f"LLMRouter[{self.model_name}] has no candidates and no default_model")
 
     def _respond(
         self,
@@ -227,13 +252,15 @@ class LLMRouter(CustomLogger):
                 "routed_via": via,
             }
 
-    def _cache_key(self, user_text: str) -> str:
+    def _cache_key(self, user_text: str, analysis: PromptAnalysis | None) -> str:
         candidate_names = tuple(sorted(self._candidates.keys()))
+        capability_flags = (analysis.vision, analysis.tools, analysis.complexity) if analysis is not None else None
         payload = json.dumps(
             {
                 "prompt": user_text,
                 "candidates": candidate_names,
                 "preference": self.config.quality_preference,
+                "capabilities": capability_flags,
             },
             sort_keys=True,
         )

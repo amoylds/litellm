@@ -213,6 +213,133 @@ class TestHeuristicFallback:
         assert result.model == "fast"
 
 
+def _specialist_candidates() -> dict:
+    return {
+        "coder": _caps(quality_score=0.5, speed_score=0.5, strengths=["code_generation"]),
+        "writer": _caps(quality_score=0.5, speed_score=0.5, strengths=["creative_writing"]),
+    }
+
+
+def _specialist_costs() -> dict:
+    return {"coder": 0.0, "writer": 0.0}
+
+
+class TestPromptAwareHeuristic:
+    @pytest.mark.asyncio
+    async def test_coding_prompt_routes_to_coder(self):
+        router = _make_router(
+            dispatcher=None,
+            config=_config(dispatcher_model=None, available_models=["coder", "writer"]),
+            candidates=_specialist_candidates(),
+            costs=_specialist_costs(),
+        )
+        result = await router.async_pre_routing_hook(
+            model="smart-router",
+            request_kwargs={},
+            messages=[{"role": "user", "content": "debug this python function and fix the algorithm bug"}],
+        )
+        assert result is not None
+        assert result.model == "coder"
+
+    @pytest.mark.asyncio
+    async def test_creative_prompt_routes_to_writer(self):
+        router = _make_router(
+            dispatcher=None,
+            config=_config(dispatcher_model=None, available_models=["coder", "writer"]),
+            candidates=_specialist_candidates(),
+            costs=_specialist_costs(),
+        )
+        result = await router.async_pre_routing_hook(
+            model="smart-router",
+            request_kwargs={},
+            messages=[{"role": "user", "content": "write a fantasy story about an imagined character"}],
+        )
+        assert result is not None
+        assert result.model == "writer"
+
+    @pytest.mark.asyncio
+    async def test_disabling_prompt_analysis_ignores_prompt_content(self):
+        config = _config(
+            dispatcher_model=None,
+            available_models=["coder", "writer"],
+            prompt_analysis_enabled=False,
+        )
+        router = _make_router(
+            dispatcher=None,
+            config=config,
+            candidates=_specialist_candidates(),
+            costs=_specialist_costs(),
+        )
+        coding = await router.async_pre_routing_hook(
+            model="smart-router",
+            request_kwargs={},
+            messages=[{"role": "user", "content": "debug this python function and fix the algorithm bug"}],
+        )
+        creative = await router.async_pre_routing_hook(
+            model="smart-router",
+            request_kwargs={},
+            messages=[{"role": "user", "content": "write a fantasy story about an imagined character"}],
+        )
+        assert coding is not None and creative is not None
+        assert coding.model == creative.model
+
+    @pytest.mark.asyncio
+    async def test_image_prompt_requires_vision_model(self):
+        candidates = {
+            "eyes": _caps(quality_score=0.4, speed_score=0.5, strengths=["vision"]),
+            "brain": _caps(quality_score=0.95, speed_score=0.5, strengths=["reasoning"]),
+        }
+        router = _make_router(
+            dispatcher=None,
+            config=_config(
+                dispatcher_model=None,
+                available_models=["eyes", "brain"],
+                quality_preference=1.0,
+            ),
+            candidates=candidates,
+            costs={"eyes": 0.0, "brain": 0.0},
+        )
+        result = await router.async_pre_routing_hook(
+            model="smart-router",
+            request_kwargs={},
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "what is in this picture"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,xxx"}},
+                    ],
+                }
+            ],
+        )
+        assert result is not None
+        assert result.model == "eyes"
+
+    @pytest.mark.asyncio
+    async def test_tools_request_prefers_tool_capable_model(self):
+        candidates = {
+            "agentic": _caps(quality_score=0.4, speed_score=0.5, strengths=["tool_use"]),
+            "chatty": _caps(quality_score=0.95, speed_score=0.5, strengths=["general_knowledge"]),
+        }
+        router = _make_router(
+            dispatcher=None,
+            config=_config(
+                dispatcher_model=None,
+                available_models=["agentic", "chatty"],
+                quality_preference=1.0,
+            ),
+            candidates=candidates,
+            costs={"agentic": 0.0, "chatty": 0.0},
+        )
+        result = await router.async_pre_routing_hook(
+            model="smart-router",
+            request_kwargs={"tools": [{"type": "function", "function": {"name": "search"}}]},
+            messages=[{"role": "user", "content": "find me the cheapest flight"}],
+        )
+        assert result is not None
+        assert result.model == "agentic"
+
+
 class TestDecisionCache:
     @pytest.mark.asyncio
     async def test_identical_prompt_hits_cache_dispatcher_called_once(self):

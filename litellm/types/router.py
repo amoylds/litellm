@@ -885,3 +885,4 @@ class LLMRouterConfig(BaseModel):
     cache_ttl_seconds: int = Field(default=300, gt=0)
     dispatcher_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     dispatcher_max_tokens: int = Field(default=200, gt=0)
+    prompt_analysis_enabled: bool = True
