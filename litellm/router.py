@@ -212,6 +212,9 @@ if TYPE_CHECKING:
     from litellm.router_strategy.quality_router.quality_router import (
         QualityRouter,
     )
+    from litellm.router_strategy.llm_router.llm_router import (
+        LLMRouter,
+    )
     from litellm.responses.streaming_iterator import (
         BaseResponsesAPIStreamingIterator,
     )
@@ -229,6 +232,7 @@ else:
     ComplexityRouter = Any
     AdaptiveRouter = Any
     QualityRouter = Any
+    LLMRouter = Any
     PreRoutingHookResponse = Any
 
 
@@ -462,6 +466,7 @@ class Router:
         self.complexity_routers: Dict[str, "ComplexityRouter"] = {}
         self.adaptive_routers: Dict[str, "AdaptiveRouter"] = {}
         self.quality_routers: Dict[str, "QualityRouter"] = {}
+        self.llm_routers: dict[str, LLMRouter] = {}
 
         # Initialize model_group_alias early since it's used in set_model_list
         self.model_group_alias: Dict[str, Union[str, RouterModelGroupAliasItem]] = (
@@ -7404,6 +7409,8 @@ class Router:
             return False  # This is handled by adaptive_router
         if litellm_params.model.startswith("auto_router/quality_router"):
             return False  # This is handled by quality_router
+        if litellm_params.model.startswith("auto_router/llm_router"):
+            return False  # This is handled by llm_router
         if litellm_params.model.startswith("auto_router/"):
             return True
         return False
@@ -7663,6 +7670,95 @@ class Router:
             )
         self.quality_routers[deployment.model_name] = quality_router
 
+    def _is_llm_router_deployment(self, litellm_params: LiteLLM_Params) -> bool:
+        """True when this deployment opts in via the `auto_router/llm_router` model prefix."""
+        return litellm_params.model.startswith("auto_router/llm_router")
+
+    def _finalize_llm_router_if_configured(self) -> None:
+        """Locate every llm-router deployment in the finalized model_list and
+        build an LLMRouter for each. Safe no-op when none are configured.
+        Idempotent: skips any deployment whose model_name is already initialized.
+
+        Deferred to the end of set_model_list() because the router needs
+        visibility into the OTHER deployments listed in `available_models`
+        (which may not yet have been processed when this one is created)."""
+        for entry in self.model_list or []:
+            lp = entry.get("litellm_params") if isinstance(entry, dict) else entry.litellm_params
+            lp_model = (lp.get("model") if isinstance(lp, dict) else lp.model) if lp else None
+            if not (lp_model and lp_model.startswith("auto_router/llm_router")):
+                continue
+            model_name = entry.get("model_name") if isinstance(entry, dict) else entry.model_name
+            if not model_name or not lp:
+                continue
+            if model_name in self.llm_routers:
+                continue
+            deployment = Deployment(
+                model_name=model_name,
+                litellm_params=(lp if not isinstance(lp, dict) else LiteLLM_Params(**lp)),
+                model_info=(entry.get("model_info") if isinstance(entry, dict) else entry.model_info),
+            )
+            self.init_llm_router_deployment(deployment=deployment)
+
+    def init_llm_router_deployment(self, deployment: Deployment) -> None:
+        """Build an LLMRouter instance for this deployment and register it.
+        Multiple llm-routers can coexist on a single Router, keyed by
+        `deployment.model_name`.
+
+        `model_to_capabilities` and `model_to_cost` are derived from the OTHER
+        models already registered in `self.model_list` whose `model_name`
+        appears in `available_models`."""
+        from litellm.router_strategy.llm_router.llm_router import LLMRouter
+        from litellm.types.router import LLMRouterCapabilities, LLMRouterConfig
+
+        raw_config = deployment.litellm_params.llm_router_config
+        if raw_config is None:
+            raise ValueError("llm_router_config is required for llm-router deployments.")
+
+        default_model: Optional[str] = deployment.litellm_params.llm_router_default_model
+        config = LLMRouterConfig.model_validate(raw_config)
+        if default_model is not None and config.default_model is None:
+            config = config.model_copy(update={"default_model": default_model})
+
+        model_to_capabilities: dict[str, LLMRouterCapabilities] = {}
+        model_to_cost: dict[str, float] = {}
+        for name in config.available_models:
+            indices = self.model_name_to_deployment_indices.get(name, [])
+            if not indices:
+                continue
+            d = (self.model_list or [])[indices[0]]
+            mi = d.get("model_info") if isinstance(d, dict) else d.model_info
+            mi_dict: dict[str, Any] = mi if isinstance(mi, dict) else (mi.model_dump() if mi else {})
+            caps_raw = mi_dict.get("llm_router_capabilities")
+            if caps_raw is not None:
+                model_to_capabilities[name] = LLMRouterCapabilities.model_validate(caps_raw)
+            else:
+                model_to_capabilities[name] = LLMRouterCapabilities()
+
+            lp = d.get("litellm_params") if isinstance(d, dict) else d.litellm_params
+            lp_dict: dict[str, Any] = lp if isinstance(lp, dict) else (lp.model_dump() if lp else {})
+            cost = lp_dict.get("input_cost_per_token")
+            if cost is not None:
+                model_to_cost[name] = float(cost)
+
+        if deployment.model_name in self.llm_routers:
+            raise ValueError(
+                f"LLM-router deployment {deployment.model_name} already exists. Please use a different model name."
+            )
+
+        llm_router = LLMRouter(
+            model_name=deployment.model_name,
+            litellm_router_instance=self,
+            config=config,
+            model_to_capabilities=model_to_capabilities,
+            model_to_cost=model_to_cost,
+        )
+        self.llm_routers[deployment.model_name] = llm_router
+        verbose_router_logger.info(
+            "LLMRouter[%s] initialized with %d models",
+            deployment.model_name,
+            len(config.available_models),
+        )
+
     def deployment_is_active_for_environment(self, deployment: Deployment) -> bool:
         """
         Function to check if a llm deployment is active for a given environment. Allows using the same config.yaml across multople environments
@@ -7712,6 +7808,7 @@ class Router:
         self.quality_routers = {}
         self.complexity_routers = {}
         self.auto_routers = {}
+        self.llm_routers = {}
         self._invalidate_model_group_info_cache()
         self._invalidate_access_groups_cache()
         # we add api_base/api_key each model so load balancing between azure/gpt on api_base1 and api_base2 works
@@ -7760,6 +7857,10 @@ class Router:
         # Deferred: build the AdaptiveRouter strategy now that all underlying
         # deployments have been registered.
         self._finalize_adaptive_router_if_configured()
+
+        # Deferred: build the LLMRouter strategy now that all underlying
+        # deployments have been registered.
+        self._finalize_llm_router_if_configured()
 
     def _add_deployment(self, deployment: Deployment) -> Deployment:
         import os
@@ -7871,10 +7972,10 @@ class Router:
         if self._is_complexity_router_deployment(litellm_params=deployment.litellm_params):
             self.init_complexity_router_deployment(deployment=deployment)
 
-        # NOTE: adaptive-router deployments are deferred to the end of
-        # set_model_list() because their init needs visibility into the OTHER
-        # deployments listed in `available_models` (which may not yet have
-        # been processed when this one is created).
+        # NOTE: adaptive-router and llm-router deployments are deferred to the
+        # end of set_model_list() because their init needs visibility into the
+        # OTHER deployments listed in `available_models` (which may not yet
+        # have been processed when this one is created).
         #########################################################
         # Check if this is a quality-router deployment
         #########################################################
@@ -10534,6 +10635,18 @@ class Router:
         #########################################################
         if model in self.quality_routers:
             return await self.quality_routers[model].async_pre_routing_hook(
+                model=model,
+                request_kwargs=request_kwargs,
+                messages=messages,
+                input=input,
+                specific_deployment=specific_deployment,
+            )
+
+        #########################################################
+        # Check if any llm-router should be used
+        #########################################################
+        if model in self.llm_routers:
+            return await self.llm_routers[model].async_pre_routing_hook(
                 model=model,
                 request_kwargs=request_kwargs,
                 messages=messages,
